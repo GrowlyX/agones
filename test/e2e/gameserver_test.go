@@ -489,6 +489,69 @@ func TestGameServerUnhealthyAfterReadyCrash(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestGameServerUnhealthyAfterReadyCrashWithGenericContainer checks that a GameServer
+// still becomes Unhealthy when the game container crashes while another generic
+// (non-sidecar) container in the Pod keeps running. With SidecarContainers enabled the
+// Pod stays in the Running phase in this scenario, since a Pod is only Failed once every
+// container has terminated, so the health controller must detect the terminated game
+// container directly rather than rely on the Pod's phase.
+func TestGameServerUnhealthyAfterReadyCrashWithGenericContainer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	log := e2eframework.TestLogger(t)
+
+	gs := framework.DefaultGameServer(framework.Namespace)
+	// a generic long-running container, such as a log shipper, that keeps running after
+	// the game container terminates, keeping the Pod out of the Failed phase.
+	gs.Spec.Template.Spec.Containers = append(gs.Spec.Template.Spec.Containers, corev1.Container{
+		Name:            "generic",
+		Image:           "registry.k8s.io/pause:3.10",
+		ImagePullPolicy: corev1.PullIfNotPresent,
+	})
+
+	readyGs, err := framework.CreateGameServerAndWaitUntilReady(t, framework.Namespace, gs)
+	if err != nil {
+		t.Fatalf("Could not get a GameServer ready: %v", err)
+	}
+
+	log.WithField("gs", readyGs.ObjectMeta.Name).Info("GameServer created")
+
+	gsClient := framework.AgonesClient.AgonesV1().GameServers(framework.Namespace)
+	defer gsClient.Delete(ctx, readyGs.ObjectMeta.Name, metav1.DeleteOptions{}) // nolint: errcheck
+
+	address := fmt.Sprintf("%s:%d", readyGs.Status.Address, readyGs.Status.Ports[0].Port)
+
+	// keep crashing, until we move to Unhealthy. Solves potential issues with controller Informer cache
+	// race conditions in which it has yet to see a GameServer is Ready before the crash.
+	var stop int32
+	defer func() {
+		atomic.StoreInt32(&stop, 1)
+	}()
+	go func() {
+		for {
+			if atomic.LoadInt32(&stop) > 0 {
+				log.Info("UDP Crash stop signal received. Stopping.")
+				return
+			}
+			var writeErr error
+			func() {
+				conn, err := net.Dial("udp", address)
+				assert.NoError(t, err)
+				defer conn.Close() // nolint: errcheck
+				_, writeErr = conn.Write([]byte("CRASH"))
+			}()
+			if writeErr != nil {
+				log.WithError(err).Warn("error sending udp packet. Stopping.")
+				return
+			}
+			log.WithField("address", address).Info("sent UDP packet")
+			time.Sleep(5 * time.Second)
+		}
+	}()
+	_, err = framework.WaitForGameServerState(t, readyGs, agonesv1.GameServerStateUnhealthy, 3*time.Minute)
+	assert.NoError(t, err)
+}
+
 func TestGameServerPodCompletedAfterCleanExit(t *testing.T) {
 	if !runtime.FeatureEnabled(runtime.FeatureSidecarContainers) {
 		t.SkipNow()
