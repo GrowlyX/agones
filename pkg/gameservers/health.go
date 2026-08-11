@@ -174,6 +174,11 @@ func (hc *HealthController) failedContainer(pod *corev1.Pod) bool {
 	// agonesv1.GameServer.Pod()), so a terminated game container can never come back.
 	// Report it as failed rather than waiting for a Pod phase transition that will not
 	// happen.
+	//
+	// Only a non-zero exit code counts. A game container that exits cleanly is a normal
+	// shutdown, and is handled by the SucceededController moving the GameServer to
+	// Shutdown - marking it Unhealthy here would win that race and, since Unhealthy is a
+	// terminal state, permanently block the move to Shutdown.
 	if runtime.FeatureEnabled(runtime.FeatureSidecarContainers) {
 		if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 			// Kubernetes may still restart the container; leave the lifecycle to it.
@@ -182,11 +187,11 @@ func (hc *HealthController) failedContainer(pod *corev1.Pod) bool {
 
 		for _, cs := range pod.Status.ContainerStatuses {
 			if cs.Name == container {
-				if cs.State.Terminated != nil {
+				if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
 					hc.baseLogger.WithField("gs", pod.ObjectMeta.Name).
 						WithField("containerStatuses", pod.Status.ContainerStatuses).
 						WithField("container", container).
-						Debug("Game server container terminated and cannot restart")
+						Debug("Game server container terminated with a non-zero exit code and cannot restart")
 					return true
 				}
 				return false

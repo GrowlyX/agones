@@ -111,6 +111,14 @@ func TestHealthControllerFailedContainerSidecarContainers(t *testing.T) {
 	noMatch := pod.DeepCopy()
 	noMatch.Status.ContainerStatuses[0].Name = "not-the-game-container"
 	assert.False(t, hc.failedContainer(noMatch))
+
+	// A clean exit is a normal shutdown, not a failure - the SucceededController moves it
+	// to Shutdown, and marking it Unhealthy here would block that permanently.
+	cleanExit := pod.DeepCopy()
+	cleanExit.Status.ContainerStatuses[0].State = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}
+	assert.False(t, hc.failedContainer(cleanExit), "a cleanly exited game container is not failed")
+	assert.False(t, hc.isUnhealthy(cleanExit))
 }
 
 func TestHealthControllerFailedPod(t *testing.T) {

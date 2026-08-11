@@ -523,33 +523,26 @@ func TestGameServerUnhealthyAfterReadyCrashWithGenericContainer(t *testing.T) {
 
 	// keep crashing, until we move to Unhealthy. Solves potential issues with controller Informer cache
 	// race conditions in which it has yet to see a GameServer is Ready before the crash.
-	var stop int32
-	defer func() {
-		atomic.StoreInt32(&stop, 1)
-	}()
-	go func() {
-		for {
-			if atomic.LoadInt32(&stop) > 0 {
-				log.Info("UDP Crash stop signal received. Stopping.")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		func() {
+			conn, err := net.Dial("udp", address)
+			if !assert.NoError(c, err) {
 				return
 			}
-			var writeErr error
-			func() {
-				conn, err := net.Dial("udp", address)
-				assert.NoError(t, err)
-				defer conn.Close() // nolint: errcheck
-				_, writeErr = conn.Write([]byte("CRASH"))
-			}()
-			if writeErr != nil {
-				log.WithError(err).Warn("error sending udp packet. Stopping.")
+			defer conn.Close() // nolint: errcheck
+			if _, err := conn.Write([]byte("CRASH")); !assert.NoError(c, err) {
 				return
 			}
 			log.WithField("address", address).Info("sent UDP packet")
-			time.Sleep(5 * time.Second)
+		}()
+
+		current, err := gsClient.Get(ctx, readyGs.ObjectMeta.Name, metav1.GetOptions{})
+		if !assert.NoError(c, err) {
+			return
 		}
-	}()
-	_, err = framework.WaitForGameServerState(t, readyGs, agonesv1.GameServerStateUnhealthy, 3*time.Minute)
-	assert.NoError(t, err)
+		log.WithField("gs", current.ObjectMeta.Name).WithField("state", current.Status.State).Info("checking GameServer state")
+		assert.Equal(c, agonesv1.GameServerStateUnhealthy, current.Status.State)
+	}, 3*time.Minute, 5*time.Second)
 }
 
 func TestGameServerPodCompletedAfterCleanExit(t *testing.T) {
