@@ -520,22 +520,11 @@ func TestGameServerUnhealthyAfterReadyCrashWithGenericContainer(t *testing.T) {
 	gsClient := framework.AgonesClient.AgonesV1().GameServers(framework.Namespace)
 	defer gsClient.Delete(ctx, readyGs.ObjectMeta.Name, metav1.DeleteOptions{}) // nolint: errcheck
 
-	address := fmt.Sprintf("%s:%d", readyGs.Status.Address, readyGs.Status.Ports[0].Port)
-
 	// keep crashing, until we move to Unhealthy. Solves potential issues with controller Informer cache
 	// race conditions in which it has yet to see a GameServer is Ready before the crash.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		func() {
-			conn, err := net.Dial("udp", address)
-			if !assert.NoError(c, err) {
-				return
-			}
-			defer conn.Close() // nolint: errcheck
-			if _, err := conn.Write([]byte("CRASH")); !assert.NoError(c, err) {
-				return
-			}
-			log.WithField("address", address).Info("sent UDP packet")
-		}()
+		// the game server exits on CRASH without replying, so an error waiting for a reply is expected.
+		_, _ = framework.SendGameServerUDP(t, readyGs, "CRASH")
 
 		current, err := gsClient.Get(ctx, readyGs.ObjectMeta.Name, metav1.GetOptions{})
 		if !assert.NoError(c, err) {
