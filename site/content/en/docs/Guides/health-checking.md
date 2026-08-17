@@ -48,15 +48,15 @@ The following is the process for what happens to a `GameServer` when it is unhea
 1. The Pod is set to `restartPolicy: Never` by default.
 2. The SDK server sidecar container is set to `restartPolicy: Always`.
 3. If a main container within the Pod fails, the `GameServer` will move to an `Unhealthy` state.
-4. Since the Pod is `restartPolicy: Never`, a terminated game server container can never be restarted, so this happens as soon as the game server container exits with a non-zero exit code, rather than waiting for the Pod to reach the `Failed` phase.
-   * If the game server container exits cleanly (exit code `0`), it is treated as a normal shutdown rather than a failure, and the `GameServer` moves to `Shutdown` once the Pod completes.
-   * The SDK server sidecar container stays alive for the entire duration of the Pod, and therefore SDK functionality is always available.
+4. Assuming the Pod is `restartPolicy: Never`, a terminated game server container can never be restarted, so this happens as soon as the game server container exits with a non-zero exit code.
+5. If the game server container exits cleanly (exit code `0`), it is treated as a normal shutdown rather than a failure, and the `GameServer` moves to `Shutdown` once the Pod completes.
+6. The SDK server sidecar container stays alive for the entire duration of the Pod, and therefore SDK functionality is always available.
 7. If the SDK sidecar fails, then it will be restarted, assuming the `restartPolicy` remains the default.
 
 ### Running Additional Workloads Alongside the Game Server
 
 If you run supporting workloads in the same Pod as your game server, such as log shippers, metrics agents or crash
-dump uploaders, declare them as
+dump uploaders, we recommend declaring them as
 [Kubernetes sidecar containers](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/): entries in
 `initContainers` with `restartPolicy: Always`, rather than extra entries in `containers`.
 
@@ -70,9 +70,9 @@ semantics tied to the lifetime of the game server container:
 * each sidecar is sent `SIGTERM` *after* the game server container has exited, and has the remainder of
   `terminationGracePeriodSeconds` to finish any work still in flight.
 
-If you declare these workloads in `containers` instead, a long-lived one will hold the Pod in the `Running` phase after
-the game server container has died. Agones will still move the `GameServer` to `Unhealthy` as described in rule 3
-above, but the Pod's own phase will no longer reflect the state of your game server.
+If you declare these workloads in `containers` instead, a long-lived one will hold the Pod in the `Running` phase
+if the game server container has crashed or exited unexpectedly. Agones will still move the `GameServer` to
+`Unhealthy` as described in rule 3 above, but the Pod's own phase will no longer reflect the state of your game server.
 
 ## Fleet Management of Unhealthy GameServers
 
