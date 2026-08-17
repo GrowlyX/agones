@@ -158,27 +158,12 @@ func (hc *HealthController) evictedPod(pod *corev1.Pod) bool {
 func (hc *HealthController) failedContainer(pod *corev1.Pod) bool {
 	container := pod.Annotations[agonesv1.GameServerContainerAnnotation]
 
-	// With SidecarContainers enabled we defer to Pod status rather than tracking restarts
-	// ourselves, since Kubernetes owns the container lifecycle. failedPod() is expected to
-	// catch a dead game container via the Failed phase.
-	//
-	// That holds only when the game container is the last container to exit: a Pod reaches
-	// the Failed phase once *every* container has terminated. A GameServer Pod that also
-	// runs a long-lived non-sidecar container — a log shipper or metrics/heap-dump uploader,
-	// for example — stays in the Running phase after the game container dies, so
-	// failedPod() never fires, and with this function short-circuiting to false the
-	// GameServer is never moved to Unhealthy. It remains Ready or Allocated indefinitely
-	// while serving nothing, and Allocated ones keep receiving players.
-	//
-	// GameServer Pods are created with RestartPolicy: Never (see
-	// agonesv1.GameServer.Pod()), so a terminated game container can never come back.
-	// Report it as failed rather than waiting for a Pod phase transition that will not
-	// happen.
-	//
-	// Only a non-zero exit code counts. A game container that exits cleanly is a normal
-	// shutdown, and is handled by the SucceededController moving the GameServer to
-	// Shutdown - marking it Unhealthy here would win that race and, since Unhealthy is a
-	// terminal state, permanently block the move to Shutdown.
+	// With SidecarContainers enabled, failedPod() normally catches a dead game container via
+	// the Failed Pod phase - but a Pod is only Failed once *every* container has terminated,
+	// so a long-lived non-sidecar container in the Pod can hold it in the Running phase after
+	// the game container has died. Since the Pod is RestartPolicy: Never, a game container
+	// that terminated with a non-zero exit code can never come back, so report it as failed
+	// directly. A zero exit code is a normal shutdown, handled by the SucceededController.
 	if runtime.FeatureEnabled(runtime.FeatureSidecarContainers) {
 		if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 			// Kubernetes may still restart the container; leave the lifecycle to it.
