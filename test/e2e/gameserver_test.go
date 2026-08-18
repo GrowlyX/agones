@@ -511,9 +511,7 @@ func TestGameServerUnhealthyAfterReadyCrashWithGenericContainer(t *testing.T) {
 	})
 
 	readyGs, err := framework.CreateGameServerAndWaitUntilReady(t, framework.Namespace, gs)
-	if err != nil {
-		t.Fatalf("Could not get a GameServer ready: %v", err)
-	}
+	require.NoError(t, err)
 
 	log.WithField("gs", readyGs.ObjectMeta.Name).Info("GameServer created")
 
@@ -527,9 +525,7 @@ func TestGameServerUnhealthyAfterReadyCrashWithGenericContainer(t *testing.T) {
 		_, _ = framework.SendGameServerUDP(t, readyGs, "CRASH")
 
 		current, err := gsClient.Get(ctx, readyGs.ObjectMeta.Name, metav1.GetOptions{})
-		if !assert.NoError(c, err) {
-			return
-		}
+		require.NoError(c, err)
 		log.WithField("gs", current.ObjectMeta.Name).WithField("state", current.Status.State).Info("checking GameServer state")
 		assert.Equal(c, agonesv1.GameServerStateUnhealthy, current.Status.State)
 	}, 3*time.Minute, 5*time.Second)
