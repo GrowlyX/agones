@@ -345,6 +345,17 @@ agones:
       memoryRequest: 0
       memoryLimit: 0
       alwaysPull: false
+      # Security context for the sdk server sidecar container.
+      # The default is compatible with the "restricted" Pod Security Standard.
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
     ping:
       name: agones-ping
       pullPolicy: IfNotPresent
