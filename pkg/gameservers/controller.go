@@ -61,11 +61,10 @@ import (
 )
 
 const (
-	sdkserverSidecarName  = "agones-gameserver-sidecar"
-	grpcPortEnvVar        = "AGONES_SDK_GRPC_PORT"
-	httpPortEnvVar        = "AGONES_SDK_HTTP_PORT"
-	passthroughPortEnvVar = "PASSTHROUGH"
-	// defaultSidecarRunAsUser is the UID the sidecar runs as when no security context is configured
+	sdkserverSidecarName    = "agones-gameserver-sidecar"
+	grpcPortEnvVar          = "AGONES_SDK_GRPC_PORT"
+	httpPortEnvVar          = "AGONES_SDK_HTTP_PORT"
+	passthroughPortEnvVar   = "PASSTHROUGH"
 	defaultSidecarRunAsUser = 1000
 )
 
