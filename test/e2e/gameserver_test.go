@@ -555,6 +555,8 @@ func TestGameServerRestrictedPodSecurity(t *testing.T) {
 	require.NoError(t, err)
 
 	gs := framework.DefaultGameServer(namespace)
+	// the restricted standard forbids hostPort, so the port must be PortPolicy None
+	gs.Spec.Ports[0] = agonesv1.GameServerPort{Name: "udp-port", PortPolicy: agonesv1.None, ContainerPort: 7654, Protocol: corev1.ProtocolUDP}
 	gs.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr.To(false),
 		RunAsNonRoot:             ptr.To(true),
