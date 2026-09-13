@@ -70,9 +70,27 @@ semantics tied to the lifetime of the game server container:
 * each sidecar is sent `SIGTERM` *after* the game server container has exited, and has the remainder of
   `terminationGracePeriodSeconds` to finish any work still in flight.
 
+{{% feature expiryVersion="1.61.0" %}}
 If you declare these workloads in `containers` instead, a long-lived one will hold the Pod in the `Running` phase
 if the game server container has crashed or exited unexpectedly. Agones will still move the `GameServer` to
 `Unhealthy` as described in rule 3 above, but the Pod's own phase will no longer reflect the state of your game server.
+{{% /feature %}}
+{{% feature publishVersion="1.61.0" %}}
+If you declare these workloads in `containers` instead, a long-lived one will hold the Pod in the `Running` phase
+after the game server container has exited. Agones does not depend on the Pod phase for this: it watches the game
+server container directly, and will move the `GameServer` to `Unhealthy` on a non-zero exit code (rule 4) or to
+`Shutdown` on a clean exit (rule 5) as soon as the game server container terminates. The Pod's own phase, however,
+will no longer reflect the state of your game server, and the other containers keep running until the `GameServer`
+is deleted.
+
+{{% alert title="Note" color="info" %}}
+Sidecar containers cannot reliably expose ports through Agones. The kubelet only passes `hostPort` mappings declared
+on regular `containers` to the CNI when the Pod sandbox is created, so a `hostPort` on an `initContainers` entry is
+silently ignored on most clusters. If a supporting workload needs its own `GameServer` port, it has to stay in
+`containers`, and the behaviour described above applies. See the
+[Sidecar Containers]({{< ref "/docs/Reference/gameserver.md#sidecar-containers" >}}) reference for details.
+{{% /alert %}}
+{{% /feature %}}
 
 ## Fleet Management of Unhealthy GameServers
 

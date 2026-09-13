@@ -172,9 +172,14 @@ Agones supports the use of [Sidecar Containers](https://kubernetes.io/docs/conce
 This requires the `RestartPolicy` to be set to `Always` and can be referenced in the `ports.*.container` field. Typically they used to run
 services that need to run alongside the GameServer container, such as log shippers, monitoring agents, allocators and other supporting services.
 
-{{< alert title="Warning" color="warning">}}
-Some CNIs (Container Network Interface) may not support the use of init containers with host ports. Please check CNI for compatibility.
-{{< /alert >}}
+{{% alert title="Warning" color="warning" %}}
+Ports on sidecar containers do not work on most clusters. When the kubelet creates the Pod sandbox it only passes the
+`hostPort` mappings declared on regular `containers` to the CNI (Container Network Interface), so a `hostPort` on an
+`initContainers` entry never reaches the standard `portmap` plugin and the port is unreachable, even though the
+`GameServer` reports it as allocated. Only CNIs that read the Pod spec themselves and implement `hostPort` on sidecar
+containers can make this work. Check your CNI for compatibility before relying on this, and otherwise keep any
+container that needs a `GameServer` port in `containers`.
+{{% /alert %}}
 
 ## Stable Network ID
 

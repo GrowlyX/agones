@@ -21,6 +21,7 @@ import (
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	agtesting "agones.dev/agones/pkg/testing"
+	agruntime "agones.dev/agones/pkg/util/runtime"
 	"github.com/heptiolabs/healthcheck"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,6 +210,111 @@ func TestSucceededControllerSyncGameServer(t *testing.T) {
 			v.expected.postTests(t, m)
 		})
 	}
+}
+
+func TestSucceededControllerGameServerContainerCompleted(t *testing.T) {
+	t.Parallel()
+
+	agruntime.FeatureTestMutex.Lock()
+	defer agruntime.FeatureTestMutex.Unlock()
+	require.NoError(t, agruntime.ParseFeatures(string(agruntime.FeatureSidecarContainers)+"=true"))
+
+	gs := agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Spec: newSingleContainerSpec()}
+	gs.ApplyDefaults()
+
+	pod, err := gs.Pod(agtesting.FakeAPIHooks{})
+	require.NoError(t, err)
+	require.Equal(t, corev1.RestartPolicyNever, pod.Spec.RestartPolicy)
+
+	// Game container exited cleanly, but a long-lived container holds the Pod in Running.
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{
+			{Name: gs.Spec.Container, State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
+			{Name: "allocator-sidecar", State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{}}},
+		},
+	}
+	assert.True(t, gameServerContainerCompleted(pod))
+	assert.True(t, podCompleted(pod))
+
+	// A non-zero exit is a failure, and is the HealthController's job.
+	crashed := pod.DeepCopy()
+	crashed.Status.ContainerStatuses[0].State.Terminated.ExitCode = 1
+	assert.False(t, gameServerContainerCompleted(crashed))
+	assert.False(t, podCompleted(crashed))
+
+	// A running game container has not completed.
+	running := pod.DeepCopy()
+	running.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	assert.False(t, gameServerContainerCompleted(running))
+	assert.False(t, podCompleted(running))
+
+	// If Kubernetes may still restart the container, leave the lifecycle to it.
+	restartable := pod.DeepCopy()
+	restartable.Spec.RestartPolicy = corev1.RestartPolicyAlways
+	assert.False(t, gameServerContainerCompleted(restartable))
+
+	// A non-matching container name must not be treated as the game container.
+	noMatch := pod.DeepCopy()
+	noMatch.Status.ContainerStatuses[0].Name = "not-the-game-container"
+	assert.False(t, gameServerContainerCompleted(noMatch))
+
+	// The Succeeded phase is still a completion on its own.
+	succeeded := running.DeepCopy()
+	succeeded.Status.Phase = corev1.PodSucceeded
+	assert.True(t, podCompleted(succeeded))
+}
+
+func TestSucceededControllerSyncGameServerContainerCompleted(t *testing.T) {
+	t.Parallel()
+
+	agruntime.FeatureTestMutex.Lock()
+	defer agruntime.FeatureTestMutex.Unlock()
+	require.NoError(t, agruntime.ParseFeatures(string(agruntime.FeatureSidecarContainers)+"=true"))
+
+	m := agtesting.NewMocks()
+	c := NewSucceededController(healthcheck.NewHandler(), m.KubeClient, m.AgonesClient, m.KubeInformerFactory, m.AgonesInformerFactory)
+	c.recorder = m.FakeRecorder
+
+	gs := &agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: newSingleContainerSpec(), Status: agonesv1.GameServerStatus{State: agonesv1.GameServerStateScheduled}}
+	gs.ApplyDefaults()
+
+	pod, err := gs.Pod(agtesting.FakeAPIHooks{})
+	require.NoError(t, err)
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{
+			{Name: gs.Spec.Container, State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
+			{Name: "allocator-sidecar", State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{}}},
+		},
+	}
+
+	m.AgonesClient.AddReactor("list", "gameservers", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &agonesv1.GameServerList{Items: []agonesv1.GameServer{*gs}}, nil
+	})
+	m.KubeClient.AddReactor("list", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &corev1.PodList{Items: []corev1.Pod{*pod}}, nil
+	})
+
+	updated := false
+	m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		updated = true
+		gs := action.(k8stesting.UpdateAction).GetObject().(*agonesv1.GameServer)
+		assert.Equal(t, agonesv1.GameServerStateShutdown, gs.Status.State)
+		return true, gs, nil
+	})
+
+	ctx, cancel := agtesting.StartInformers(m, c.gameServerSynced, c.podSynced)
+	defer cancel()
+
+	require.NoError(t, c.syncGameServer(ctx, "default/test"))
+	require.True(t, updated)
+	agtesting.AssertEventContains(t, m.FakeRecorder.Events, "Normal Shutdown Game server container exited cleanly")
 }
 
 func TestSucceededControllerRun(t *testing.T) {

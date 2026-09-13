@@ -85,13 +85,13 @@ func NewSucceededController(health healthcheck.Handler,
 	_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pod := obj.(*corev1.Pod)
-			if isGameServerPod(pod) && pod.Status.Phase == corev1.PodSucceeded {
+			if isGameServerPod(pod) && podCompleted(pod) {
 				c.workerqueue.Enqueue(pod)
 			}
 		},
 		UpdateFunc: func(_, newObj any) {
 			pod := newObj.(*corev1.Pod)
-			if isGameServerPod(pod) && pod.Status.Phase == corev1.PodSucceeded {
+			if isGameServerPod(pod) && podCompleted(pod) {
 				c.workerqueue.Enqueue(pod)
 			}
 		},
@@ -109,7 +109,7 @@ func NewSucceededController(health healthcheck.Handler,
 				return
 			}
 			pod, err := c.podLister.Pods(gs.ObjectMeta.Namespace).Get(gs.ObjectMeta.Name)
-			if err == nil && isGameServerPod(pod) && pod.Status.Phase == corev1.PodSucceeded {
+			if err == nil && isGameServerPod(pod) && podCompleted(pod) {
 				c.workerqueue.Enqueue(pod)
 			}
 		},
@@ -152,12 +152,16 @@ func (c *SucceededController) syncGameServer(ctx context.Context, key string) er
 		return nil
 	}
 
-	// If the pod exists but is not in Succeeded state or is being terminated, we don't need to do anything
-	if !isGameServerPod(pod) || pod.Status.Phase != corev1.PodSucceeded || !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+	// If the pod exists but has not completed or is being terminated, we don't need to do anything
+	if !isGameServerPod(pod) || !podCompleted(pod) || !pod.ObjectMeta.DeletionTimestamp.IsZero() {
 		return nil
 	}
 
-	c.loggerForGameServerKey(key).Debug("Pod is in Succeeded state. Moving GameServer to Shutdown.")
+	reason := "Pod is in Succeeded state"
+	if pod.Status.Phase != corev1.PodSucceeded {
+		reason = "Game server container exited cleanly"
+	}
+	c.loggerForGameServerKey(key).WithField("reason", reason).Debug("Moving GameServer to Shutdown.")
 
 	gs, err := c.gameServerLister.GameServers(namespace).Get(name)
 	if err != nil {
@@ -181,6 +185,35 @@ func (c *SucceededController) syncGameServer(ctx context.Context, key string) er
 		return c.errs.Wrap(err, "error updating GameServer to Shutdown")
 	}
 
-	c.recorder.Event(gs, corev1.EventTypeNormal, string(gs.Status.State), "Pod is in Succeeded state")
+	c.recorder.Event(gs, corev1.EventTypeNormal, string(gs.Status.State), reason)
 	return nil
+}
+
+// podCompleted returns true if the Pod has finished successfully: either it is in the
+// Succeeded phase, or the game server container has exited cleanly and can never restart.
+func podCompleted(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodSucceeded || gameServerContainerCompleted(pod)
+}
+
+// gameServerContainerCompleted returns true when the game server container has terminated
+// with a zero exit code and the Pod will never restart it.
+//
+// A Pod only reaches the Succeeded phase once *every* container in `containers` has
+// terminated, so a long-lived non-sidecar container can hold the Pod in the Running phase
+// after the game server has finished. With SidecarContainers enabled the Pod is
+// RestartPolicy: Never, so a cleanly exited game server container is done regardless of
+// what the rest of the Pod is doing. The non-zero exit code case is handled by the
+// HealthController.
+func gameServerContainerCompleted(pod *corev1.Pod) bool {
+	if !runtime.FeatureEnabled(runtime.FeatureSidecarContainers) || pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		return false
+	}
+
+	container := pod.Annotations[agonesv1.GameServerContainerAnnotation]
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == container {
+			return cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0
+		}
+	}
+	return false
 }
