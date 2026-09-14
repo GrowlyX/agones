@@ -212,6 +212,16 @@ func TestSucceededControllerSyncGameServer(t *testing.T) {
 	}
 }
 
+// newLongLivedContainerSpec returns a spec with a second, long-lived container in `containers`,
+// which holds the Pod in Running after the game server container exits.
+func newLongLivedContainerSpec() agonesv1.GameServerSpec {
+	spec := newSingleContainerSpec()
+	spec.Container = spec.Template.Spec.Containers[0].Name
+	spec.Template.Spec.Containers = append(spec.Template.Spec.Containers,
+		corev1.Container{Name: "long-lived", Image: "long-lived/image"})
+	return spec
+}
+
 func TestSucceededControllerGameServerContainerCompleted(t *testing.T) {
 	t.Parallel()
 
@@ -219,7 +229,7 @@ func TestSucceededControllerGameServerContainerCompleted(t *testing.T) {
 	defer agruntime.FeatureTestMutex.Unlock()
 	require.NoError(t, agruntime.ParseFeatures(string(agruntime.FeatureSidecarContainers)+"=true"))
 
-	gs := agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Spec: newSingleContainerSpec()}
+	gs := agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Spec: newLongLivedContainerSpec()}
 	gs.ApplyDefaults()
 
 	pod, err := gs.Pod(agtesting.FakeAPIHooks{})
@@ -232,7 +242,7 @@ func TestSucceededControllerGameServerContainerCompleted(t *testing.T) {
 		ContainerStatuses: []corev1.ContainerStatus{
 			{Name: gs.Spec.Container, State: corev1.ContainerState{
 				Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
-			{Name: "allocator-sidecar", State: corev1.ContainerState{
+			{Name: "long-lived", State: corev1.ContainerState{
 				Running: &corev1.ContainerStateRunning{}}},
 		},
 	}
@@ -261,6 +271,11 @@ func TestSucceededControllerGameServerContainerCompleted(t *testing.T) {
 	noMatch.Status.ContainerStatuses[0].Name = "not-the-game-container"
 	assert.False(t, gameServerContainerCompleted(noMatch))
 
+	// A Pod with only the game server container reaches Succeeded on its own.
+	single := pod.DeepCopy()
+	single.Spec.Containers = single.Spec.Containers[:1]
+	assert.False(t, gameServerContainerCompleted(single))
+
 	// The Succeeded phase is still a completion on its own.
 	succeeded := running.DeepCopy()
 	succeeded.Status.Phase = corev1.PodSucceeded
@@ -279,7 +294,7 @@ func TestSucceededControllerSyncGameServerContainerCompleted(t *testing.T) {
 	c.recorder = m.FakeRecorder
 
 	gs := &agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-		Spec: newSingleContainerSpec(), Status: agonesv1.GameServerStatus{State: agonesv1.GameServerStateScheduled}}
+		Spec: newLongLivedContainerSpec(), Status: agonesv1.GameServerStatus{State: agonesv1.GameServerStateScheduled}}
 	gs.ApplyDefaults()
 
 	pod, err := gs.Pod(agtesting.FakeAPIHooks{})
@@ -289,7 +304,7 @@ func TestSucceededControllerSyncGameServerContainerCompleted(t *testing.T) {
 		ContainerStatuses: []corev1.ContainerStatus{
 			{Name: gs.Spec.Container, State: corev1.ContainerState{
 				Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
-			{Name: "allocator-sidecar", State: corev1.ContainerState{
+			{Name: "long-lived", State: corev1.ContainerState{
 				Running: &corev1.ContainerStateRunning{}}},
 		},
 	}

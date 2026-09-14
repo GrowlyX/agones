@@ -41,8 +41,8 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
-// SucceededController changes the state of a GameServer to Shutdown
-// when its Pod has a backing state of Succeeded.
+// SucceededController changes the state of a GameServer to Shutdown when its Pod has
+// completed: either the Pod reached Succeeded, or the game server container exited cleanly.
 type SucceededController struct {
 	baseLogger       *logrus.Entry
 	podSynced        cache.InformerSynced
@@ -133,7 +133,7 @@ func (c *SucceededController) loggerForGameServerKey(key string) *logrus.Entry {
 	return logfields.AugmentLogEntry(c.baseLogger, logfields.GameServerKey, key)
 }
 
-// syncGameServer changes a GameServer to Shutdown state when its Pod is in Succeeded state
+// syncGameServer changes a GameServer to Shutdown state when its Pod has completed
 func (c *SucceededController) syncGameServer(ctx context.Context, key string) error {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -142,7 +142,7 @@ func (c *SucceededController) syncGameServer(ctx context.Context, key string) er
 		return nil
 	}
 
-	// check if the pod exists and is in Succeeded state
+	// check if the pod exists and has completed
 	pod, err := c.podLister.Pods(namespace).Get(name)
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
@@ -196,16 +196,12 @@ func podCompleted(pod *corev1.Pod) bool {
 }
 
 // gameServerContainerCompleted returns true when the game server container has terminated
-// with a zero exit code and the Pod will never restart it.
-//
-// A Pod only reaches the Succeeded phase once *every* container in `containers` has
-// terminated, so a long-lived non-sidecar container can hold the Pod in the Running phase
-// after the game server has finished. With SidecarContainers enabled the Pod is
-// RestartPolicy: Never, so a cleanly exited game server container is done regardless of
-// what the rest of the Pod is doing. The non-zero exit code case is handled by the
-// HealthController.
+// with a zero exit code and the Pod will never restart it. The non-zero exit code case is
+// handled by the HealthController.
 func gameServerContainerCompleted(pod *corev1.Pod) bool {
-	if !runtime.FeatureEnabled(runtime.FeatureSidecarContainers) || pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+	// a Pod only reaches Succeeded once *every* container in `containers` has terminated, so only a
+	// Pod with more than one of them can be held in Running by something other than the game server.
+	if len(pod.Spec.Containers) < 2 || pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		return false
 	}
 
