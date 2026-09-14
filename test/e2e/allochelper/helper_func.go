@@ -77,6 +77,8 @@ const (
 
 // CopyDefaultAllocatorClientSecret copys the allocator client secret
 func CopyDefaultAllocatorClientSecret(ctx context.Context, t *testing.T, toNamespace string, framework *e2e.Framework) {
+	t.Helper()
+
 	kubeCore := framework.KubeClient.CoreV1()
 	clientSecret, err := kubeCore.Secrets(allocatorClientSecretNamespace).Get(ctx, allocatorClientSecretName, metav1.GetOptions{})
 	if err != nil {
@@ -85,7 +87,7 @@ func CopyDefaultAllocatorClientSecret(ctx context.Context, t *testing.T, toNames
 	clientSecret.ObjectMeta.Namespace = toNamespace
 	clientSecret.ResourceVersion = ""
 	_, err = kubeCore.Secrets(toNamespace).Create(ctx, clientSecret, metav1.CreateOptions{})
-	if err != nil {
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		t.Fatalf("Could not copy default allocator client %s/%s secret to namespace %s: %v", allocatorClientSecretNamespace, allocatorClientSecretName, toNamespace, err)
 	}
 }
