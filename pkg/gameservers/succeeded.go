@@ -199,9 +199,20 @@ func podCompleted(pod *corev1.Pod) bool {
 // with a zero exit code and the Pod will never restart it. The non-zero exit code case is
 // handled by the HealthController.
 func gameServerContainerCompleted(pod *corev1.Pod) bool {
+	// a Failed Pod belongs to the HealthController, which watches the same updates. Leave it be,
+	// rather than racing it to write Shutdown over its Unhealthy.
+	if pod.Status.Phase == corev1.PodFailed {
+		return false
+	}
+
 	// a Pod only reaches Succeeded once *every* container in `containers` has terminated, so only a
 	// Pod with more than one of them can be held in Running by something other than the game server.
-	if len(pod.Spec.Containers) < 2 || pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+	if len(pod.Spec.Containers) < 2 {
+		return false
+	}
+
+	// only RestartPolicy: Always brings a container that exited 0 back.
+	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever && pod.Spec.RestartPolicy != corev1.RestartPolicyOnFailure {
 		return false
 	}
 

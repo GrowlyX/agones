@@ -690,10 +690,15 @@ func TestGameServerShutdownAfterCleanExitWithLongLivedContainer(t *testing.T) {
 	require.NoError(t, err, "Could not get a GameServer ready")
 	defer framework.AgonesClient.AgonesV1().GameServers(framework.Namespace).Delete(ctx, readyGs.ObjectMeta.Name, metav1.DeleteOptions{}) // nolint: errcheck
 
-	// the game server exits on CRASH without replying, so an error waiting for a reply is expected.
-	_, _ = framework.SendGameServerUDP(t, readyGs, "CRASH 0")
+	// the game server exits on CRASH without replying, so don't wait for one. Keep sending until
+	// the GameServer is gone, in case the packet is dropped.
+	conn, err := net.Dial("udp", net.JoinHostPort(readyGs.Status.Address, strconv.Itoa(int(readyGs.Status.Ports[0].Port))))
+	require.NoError(t, err)
+	defer conn.Close() // nolint: errcheck
 
 	result := assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, _ = conn.Write([]byte("CRASH 0"))
+
 		_, err := framework.AgonesClient.AgonesV1().GameServers(framework.Namespace).Get(ctx, readyGs.ObjectMeta.Name, metav1.GetOptions{})
 		assert.True(c, k8serrors.IsNotFound(err), "GameServer should be removed after the game server container exits cleanly")
 	}, 5*time.Minute, 3*time.Second)

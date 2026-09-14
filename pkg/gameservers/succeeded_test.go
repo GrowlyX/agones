@@ -254,6 +254,18 @@ func TestSucceededControllerGameServerContainerCompleted(t *testing.T) {
 				pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
 			},
 		},
+		"pod only restarts containers that fail": {
+			setup: func(pod *corev1.Pod) {
+				pod.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+			},
+			containerCompleted: true,
+			podCompleted:       true,
+		},
+		"pod is in the Failed phase": {
+			setup: func(pod *corev1.Pod) {
+				pod.Status.Phase = corev1.PodFailed
+			},
+		},
 		"no container status for the game server container": {
 			setup: func(pod *corev1.Pod) {
 				pod.Status.ContainerStatuses[0].Name = "not-the-game-container"
