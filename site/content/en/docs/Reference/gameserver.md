@@ -173,7 +173,7 @@ This requires the `RestartPolicy` to be set to `Always` and can be referenced in
 services that need to run alongside the GameServer container, such as log shippers, monitoring agents, allocators and other supporting services.
 
 {{% alert title="Warning" color="warning" %}}
-Ports on sidecar containers do not work on most clusters. When the kubelet creates the Pod sandbox it only passes the
+Ports on sidecar containers are not mapped by Kubernetes. When the kubelet creates the Pod sandbox it only passes the
 `hostPort` mappings declared on regular `containers` to the CNI (Container Network Interface), so a `hostPort` on an
 `initContainers` entry never reaches the standard `portmap` plugin and the port is unreachable, even though the
 `GameServer` reports it as allocated. Only CNIs that read the Pod spec themselves and implement `hostPort` on sidecar

@@ -81,12 +81,12 @@ after the game server container has exited. Agones does not depend on the Pod ph
 server container directly, and will move the `GameServer` to `Unhealthy` on a non-zero exit code (rule 4) or to
 `Shutdown` on a clean exit (rule 5) as soon as the game server container terminates. The Pod's own phase, however,
 will no longer reflect the state of your game server, and the other containers keep running until the `GameServer`
-is deleted.
+is shutdown.
 
 {{% alert title="Note" color="info" %}}
 Sidecar containers cannot reliably expose ports through Agones. The kubelet only passes `hostPort` mappings declared
 on regular `containers` to the CNI when the Pod sandbox is created, so a `hostPort` on an `initContainers` entry is
-silently ignored on most clusters. If a supporting workload needs its own `GameServer` port, it has to stay in
+not mapped by Kubernetes. If a supporting workload needs its own `GameServer` port, it has to stay in
 `containers`, and the behaviour described above applies. See the
 [Sidecar Containers]({{< ref "/docs/Reference/gameserver.md#sidecar-containers" >}}) reference for details.
 {{% /alert %}}

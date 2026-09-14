@@ -229,57 +229,75 @@ func TestSucceededControllerGameServerContainerCompleted(t *testing.T) {
 	defer agruntime.FeatureTestMutex.Unlock()
 	require.NoError(t, agruntime.ParseFeatures(string(agruntime.FeatureSidecarContainers)+"=true"))
 
-	gs := agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Spec: newLongLivedContainerSpec()}
-	gs.ApplyDefaults()
-
-	pod, err := gs.Pod(agtesting.FakeAPIHooks{})
-	require.NoError(t, err)
-	require.Equal(t, corev1.RestartPolicyNever, pod.Spec.RestartPolicy)
-
-	// Game container exited cleanly, but a long-lived container holds the Pod in Running.
-	pod.Status = corev1.PodStatus{
-		Phase: corev1.PodRunning,
-		ContainerStatuses: []corev1.ContainerStatus{
-			{Name: gs.Spec.Container, State: corev1.ContainerState{
-				Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
-			{Name: "long-lived", State: corev1.ContainerState{
-				Running: &corev1.ContainerStateRunning{}}},
+	fixtures := map[string]struct {
+		setup              func(pod *corev1.Pod)
+		containerCompleted bool
+		podCompleted       bool
+	}{
+		"game server container exited cleanly": {
+			setup:              func(_ *corev1.Pod) {},
+			containerCompleted: true,
+			podCompleted:       true,
+		},
+		"game server container exited with a non-zero exit code": {
+			setup: func(pod *corev1.Pod) {
+				pod.Status.ContainerStatuses[0].State.Terminated.ExitCode = 1
+			},
+		},
+		"game server container is still running": {
+			setup: func(pod *corev1.Pod) {
+				pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+			},
+		},
+		"kubernetes may still restart the game server container": {
+			setup: func(pod *corev1.Pod) {
+				pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
+			},
+		},
+		"no container status for the game server container": {
+			setup: func(pod *corev1.Pod) {
+				pod.Status.ContainerStatuses[0].Name = "not-the-game-container"
+			},
+		},
+		"game server container is the only container in the pod": {
+			setup: func(pod *corev1.Pod) {
+				pod.Spec.Containers = pod.Spec.Containers[:1]
+			},
+		},
+		"pod is in the Succeeded phase": {
+			setup: func(pod *corev1.Pod) {
+				pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+				pod.Status.Phase = corev1.PodSucceeded
+			},
+			podCompleted: true,
 		},
 	}
-	assert.True(t, gameServerContainerCompleted(pod))
-	assert.True(t, podCompleted(pod))
 
-	// A non-zero exit is a failure, and is the HealthController's job.
-	crashed := pod.DeepCopy()
-	crashed.Status.ContainerStatuses[0].State.Terminated.ExitCode = 1
-	assert.False(t, gameServerContainerCompleted(crashed))
-	assert.False(t, podCompleted(crashed))
+	for k, v := range fixtures {
+		t.Run(k, func(t *testing.T) {
+			gs := agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test"}, Spec: newLongLivedContainerSpec()}
+			gs.ApplyDefaults()
 
-	// A running game container has not completed.
-	running := pod.DeepCopy()
-	running.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
-	assert.False(t, gameServerContainerCompleted(running))
-	assert.False(t, podCompleted(running))
+			pod, err := gs.Pod(agtesting.FakeAPIHooks{})
+			require.NoError(t, err)
+			require.Equal(t, corev1.RestartPolicyNever, pod.Spec.RestartPolicy)
 
-	// If Kubernetes may still restart the container, leave the lifecycle to it.
-	restartable := pod.DeepCopy()
-	restartable.Spec.RestartPolicy = corev1.RestartPolicyAlways
-	assert.False(t, gameServerContainerCompleted(restartable))
+			// the game server container exited cleanly, but the long-lived container holds the Pod in Running.
+			pod.Status = corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: gs.Spec.Container, State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
+					{Name: "long-lived", State: corev1.ContainerState{
+						Running: &corev1.ContainerStateRunning{}}},
+				},
+			}
+			v.setup(pod)
 
-	// A non-matching container name must not be treated as the game container.
-	noMatch := pod.DeepCopy()
-	noMatch.Status.ContainerStatuses[0].Name = "not-the-game-container"
-	assert.False(t, gameServerContainerCompleted(noMatch))
-
-	// A Pod with only the game server container reaches Succeeded on its own.
-	single := pod.DeepCopy()
-	single.Spec.Containers = single.Spec.Containers[:1]
-	assert.False(t, gameServerContainerCompleted(single))
-
-	// The Succeeded phase is still a completion on its own.
-	succeeded := running.DeepCopy()
-	succeeded.Status.Phase = corev1.PodSucceeded
-	assert.True(t, podCompleted(succeeded))
+			assert.Equal(t, v.containerCompleted, gameServerContainerCompleted(pod))
+			assert.Equal(t, v.podCompleted, podCompleted(pod))
+		})
+	}
 }
 
 func TestSucceededControllerSyncGameServerContainerCompleted(t *testing.T) {
