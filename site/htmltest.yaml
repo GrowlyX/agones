@@ -27,6 +27,7 @@ IgnoreURLs:
   - https://github.com/agones-dev/agones/blob/main/docs/proposals
   - https://www.terraform.io/
   - https://repost\.aws/.*
+  - https://cmake\.org
   - https://1-.*\.agones\.dev
   - https://development.agones.dev
 
