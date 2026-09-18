@@ -49,7 +49,7 @@ The following is the process for what happens to a `GameServer` when it is unhea
 2. The SDK server sidecar container is set to `restartPolicy: Always`.
 3. If a main container within the Pod fails, the `GameServer` will move to an `Unhealthy` state.
 4. Assuming the Pod is `restartPolicy: Never`, a terminated game server container can never be restarted, so this happens as soon as the game server container exits with a non-zero exit code.
-5. Assuming the Pod is `restartPolicy: Never` or `OnFailure`, a game server container that exits cleanly (exit code `0`) can never be restarted, so it is treated as a normal shutdown rather than a failure, and the `GameServer` moves to `Shutdown` as soon as the game server container exits.
+5. {{% feature expiryVersion="1.61.0" %}}If the game server container exits cleanly (exit code `0`), it is treated as a normal shutdown rather than a failure, and the `GameServer` moves to `Shutdown` once the Pod completes.{{% /feature %}}{{% feature publishVersion="1.61.0" %}}Assuming the Pod is `restartPolicy: Never` or `OnFailure`, a game server container that exits cleanly (exit code `0`) can never be restarted, so it is treated as a normal shutdown rather than a failure, and the `GameServer` moves to `Shutdown` as soon as the game server container exits.{{% /feature %}}
 6. The SDK server sidecar container stays alive for the entire duration of the Pod, and therefore SDK functionality is always available.
 7. If the SDK sidecar fails, then it will be restarted, assuming the `restartPolicy` remains the default.
 

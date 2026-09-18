@@ -212,7 +212,7 @@ func gameServerContainerCompleted(pod *corev1.Pod) bool {
 	}
 
 	// only RestartPolicy: Always brings a container that exited 0 back.
-	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever && pod.Spec.RestartPolicy != corev1.RestartPolicyOnFailure {
+	if pod.Spec.RestartPolicy == corev1.RestartPolicyAlways {
 		return false
 	}
 
