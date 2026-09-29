@@ -1,0 +1,100 @@
+# Revival's production images of this fork: agones-controller, agones-extensions and agones-sdk for
+# linux/amd64, pushed to GHCR (ghcr.io/<owner>/agones-*) with only the workflow's GITHUB_TOKEN, so no
+# registry secrets live in this repo. The prod cluster pulls them from GHCR over the internet.
+#
+# Built exactly like build/Makefile's *-image-amd64 targets: CGO_ENABLED=0 static binaries with the
+# repo's Go toolchain, the version stamped into agones.dev/agones/pkg.Version, LICENSES and
+# dependencies-src.tgz from the repo's own scripts, then each cmd/<name>/Dockerfile.
+#
+# Tags: <base_version>-sdkports.<short sha> (immutable, what the cluster pins) and sdkports-latest.
+name: revival images
+
+on:
+  push:
+    branches: ["revival/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: revival-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: version
+        id: v
+        run: |
+          set -euo pipefail
+          base=$(sed -n 's/^base_version = //p' build/Makefile)
+          short=$(git rev-parse --short=7 HEAD)
+          owner=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "version=${base}-sdkports.${short}" >> "$GITHUB_OUTPUT"
+          echo "registry=ghcr.io/${owner}" >> "$GITHUB_OUTPUT"
+          echo "building ${base}-sdkports.${short} for ghcr.io/${owner}"
+
+      - name: binaries (linux/amd64, static)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+          GO111MODULE: "on"
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          for b in controller extensions sdk-server; do
+            go build -mod=vendor -buildvcs=false -tags none \
+              -ldflags "-X agones.dev/agones/pkg.Version=${VERSION}" -installsuffix cgo \
+              -o "cmd/${b}/bin/${b}.linux.amd64" "agones.dev/agones/cmd/${b}"
+          done
+          file cmd/*/bin/*.linux.amd64
+
+      - name: licenses and required source
+        run: |
+          set -euo pipefail
+          mkdir -p cmd/ping/bin cmd/allocator/bin cmd/processor/bin
+          bash build/extract-licenses.sh
+          bash build/build-required-src-dist.sh
+          ls -la cmd/controller/bin cmd/extensions/bin cmd/sdk-server/bin
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          REG: ${{ steps.v.outputs.registry }}
+        run: |
+          set -euo pipefail
+          for b in controller extensions sdk-server; do
+            img="agones-${b}"; [ "$b" = sdk-server ] && img="agones-sdk"
+            docker buildx build --platform linux/amd64 --provenance=false --push \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --tag "${REG}/${img}:${VERSION}" --tag "${REG}/${img}:sdkports-latest" \
+              "cmd/${b}"
+          done
+          {
+            echo "### Images"
+            for img in agones-controller agones-extensions agones-sdk; do
+              d=$(docker buildx imagetools inspect "${REG}/${img}:${VERSION}" --format '{{json .Manifest.Digest}}' | tr -d '"')
+              echo "- \`${REG}/${img}:${VERSION}\` \`${d}\`"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
