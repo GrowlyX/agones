@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -2582,4 +2583,112 @@ func TestMergeRemoveDuplicates(t *testing.T) {
 			assert.Equal(t, testCase.want, got)
 		})
 	}
+}
+
+func TestGameServerSDKServerPorts(t *testing.T) {
+	t.Parallel()
+
+	newGameServer := func(ports ...GameServerPort) *GameServer {
+		return &GameServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", UID: "1234"},
+			Spec: GameServerSpec{
+				Ports: ports,
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						HostNetwork: true,
+						Containers:  []corev1.Container{{Name: "gameserver", Image: "gameserver/image"}},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("IsSDKServerPortName", func(t *testing.T) {
+		t.Parallel()
+		assert.True(t, IsSDKServerPortName(SDKGRPCPortName))
+		assert.True(t, IsSDKServerPortName(SDKHTTPPortName))
+		assert.True(t, IsSDKServerPortName(SDKHealthPortName))
+		assert.False(t, IsSDKServerPortName("default"))
+		assert.False(t, IsSDKServerPortName(""))
+	})
+
+	t.Run("defaults to TCP", func(t *testing.T) {
+		t.Parallel()
+		gs := newGameServer(
+			GameServerPort{Name: "game", PortPolicy: Passthrough},
+			GameServerPort{Name: SDKGRPCPortName, PortPolicy: Passthrough},
+			GameServerPort{Name: SDKHealthPortName, PortPolicy: Passthrough, Protocol: corev1.ProtocolUDP},
+		)
+		gs.ApplyDefaults()
+		assert.Equal(t, corev1.ProtocolUDP, gs.Spec.Ports[0].Protocol)
+		assert.Equal(t, corev1.ProtocolTCP, gs.Spec.Ports[1].Protocol)
+		// an explicit protocol is not overwritten (and fails validation)
+		assert.Equal(t, corev1.ProtocolUDP, gs.Spec.Ports[2].Protocol)
+	})
+
+	t.Run("SDKServerPort", func(t *testing.T) {
+		t.Parallel()
+		gs := newGameServer(
+			GameServerPort{Name: SDKGRPCPortName, PortPolicy: Passthrough, HostPort: 7002},
+			GameServerPort{Name: SDKHTTPPortName, PortPolicy: Static, ContainerPort: 7003, HostPort: 7003},
+			GameServerPort{Name: SDKHealthPortName, PortPolicy: Passthrough},
+		)
+		p, ok := gs.Spec.SDKServerPort(SDKGRPCPortName)
+		assert.True(t, ok)
+		assert.Equal(t, int32(7002), p)
+		p, ok = gs.Spec.SDKServerPort(SDKHTTPPortName)
+		assert.True(t, ok)
+		assert.Equal(t, int32(7003), p)
+		// not allocated yet
+		_, ok = gs.Spec.SDKServerPort(SDKHealthPortName)
+		assert.False(t, ok)
+		_, ok = newGameServer().Spec.SDKServerPort(SDKGRPCPortName)
+		assert.False(t, ok)
+	})
+
+	t.Run("Validate", func(t *testing.T) {
+		t.Parallel()
+		portsPath := field.NewPath("spec", "ports")
+
+		gs := newGameServer(
+			GameServerPort{Name: "game", PortPolicy: Passthrough},
+			GameServerPort{Name: SDKGRPCPortName, PortPolicy: Passthrough},
+			GameServerPort{Name: SDKHTTPPortName, PortPolicy: Passthrough},
+			GameServerPort{Name: SDKHealthPortName, PortPolicy: Passthrough},
+		)
+		gs.ApplyDefaults()
+		assert.Empty(t, gs.Validate(fakeAPIHooks{}))
+
+		gs = newGameServer(
+			GameServerPort{Name: SDKGRPCPortName, PortPolicy: Passthrough, Protocol: corev1.ProtocolUDP},
+			GameServerPort{Name: SDKHTTPPortName, PortPolicy: None, ContainerPort: 7003},
+			GameServerPort{Name: SDKHealthPortName, PortPolicy: Passthrough, Container: ptr.To("sidecar")},
+			GameServerPort{Name: SDKGRPCPortName, PortPolicy: Passthrough},
+		)
+		gs.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "sidecar", Image: "sidecar/image",
+			RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+		gs.ApplyDefaults()
+		assert.ElementsMatch(t, field.ErrorList{
+			field.Invalid(portsPath.Index(0).Child("protocol"), corev1.ProtocolUDP, ErrSDKServerPortProtocol),
+			field.Invalid(portsPath.Index(1).Child("portPolicy"), None, ErrSDKServerPortPolicy),
+			field.Invalid(portsPath.Index(2).Child("container"), "sidecar", ErrSDKServerPortContainer),
+			field.Duplicate(portsPath.Index(3).Child("name"), SDKGRPCPortName),
+		}, gs.Validate(fakeAPIHooks{}))
+	})
+
+	t.Run("Pod does not declare SDK server ports on the game server container", func(t *testing.T) {
+		t.Parallel()
+		gs := newGameServer(
+			GameServerPort{Name: SDKGRPCPortName, PortPolicy: Passthrough, HostPort: 7002},
+			GameServerPort{Name: "game", PortPolicy: Passthrough, HostPort: 7001},
+			GameServerPort{Name: SDKHealthPortName, PortPolicy: Passthrough, HostPort: 7004},
+		)
+		gs.ApplyDefaults()
+		pod, err := gs.Pod(fakeAPIHooks{})
+		require.NoError(t, err)
+		require.Len(t, pod.Spec.Containers, 1)
+		assert.Equal(t, []corev1.ContainerPort{{HostPort: 7001, Protocol: corev1.ProtocolUDP}}, pod.Spec.Containers[0].Ports)
+		assert.JSONEq(t, `{"gameserver":[0]}`, pod.ObjectMeta.Annotations[PassthroughPortAssignmentAnnotation])
+		assert.True(t, pod.Spec.HostNetwork)
+	})
 }

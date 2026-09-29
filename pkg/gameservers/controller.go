@@ -61,11 +61,13 @@ import (
 )
 
 const (
-	sdkserverSidecarName    = "agones-gameserver-sidecar"
-	grpcPortEnvVar          = "AGONES_SDK_GRPC_PORT"
-	httpPortEnvVar          = "AGONES_SDK_HTTP_PORT"
-	passthroughPortEnvVar   = "PASSTHROUGH"
-	defaultSidecarRunAsUser = 1000
+	sdkserverSidecarName = "agones-gameserver-sidecar"
+	grpcPortEnvVar       = "AGONES_SDK_GRPC_PORT"
+	httpPortEnvVar       = "AGONES_SDK_HTTP_PORT"
+	// defaultSDKHealthPort is the default port of the SDK server's health check server (see cmd/sdk-server).
+	defaultSDKHealthPort    int32 = 8080
+	passthroughPortEnvVar         = "PASSTHROUGH"
+	defaultSidecarRunAsUser       = 1000
 )
 
 // Extensions struct contains what is needed to bind webhook handlers
@@ -783,7 +785,7 @@ func (c *Controller) sidecar(gs *agonesv1.GameServer) corev1.Container {
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/healthz",
-					Port: intstr.FromInt(8080),
+					Port: intstr.FromInt32(sdkHealthPort(gs)),
 				},
 			},
 			InitialDelaySeconds: 3,
@@ -791,12 +793,34 @@ func (c *Controller) sidecar(gs *agonesv1.GameServer) corev1.Container {
 		},
 	}
 
-	if gs.Spec.SdkServer.GRPCPort != 0 {
-		sidecar.Args = append(sidecar.Args, fmt.Sprintf("--grpc-port=%d", gs.Spec.SdkServer.GRPCPort))
+	grpcPort, httpPort := sdkServerPorts(gs)
+	if grpcPort != 0 {
+		sidecar.Args = append(sidecar.Args, fmt.Sprintf("--grpc-port=%d", grpcPort))
 	}
 
-	if gs.Spec.SdkServer.HTTPPort != 0 {
-		sidecar.Args = append(sidecar.Args, fmt.Sprintf("--http-port=%d", gs.Spec.SdkServer.HTTPPort))
+	if httpPort != 0 {
+		sidecar.Args = append(sidecar.Args, fmt.Sprintf("--http-port=%d", httpPort))
+	}
+
+	if healthPort, ok := gs.Spec.SDKServerPort(agonesv1.SDKHealthPortName); ok {
+		sidecar.Args = append(sidecar.Args, fmt.Sprintf("--health-port=%d", healthPort))
+	}
+
+	// Declare the SDK server ports from spec.ports on the sidecar, which is the container that binds them.
+	// This keeps them out of the game server container, and lets the scheduler account for their host ports.
+	for _, p := range gs.Spec.Ports {
+		if !agonesv1.IsSDKServerPortName(p.Name) {
+			continue
+		}
+		port, ok := gs.Spec.SDKServerPort(p.Name)
+		if !ok {
+			continue
+		}
+		sidecar.Ports = append(sidecar.Ports, corev1.ContainerPort{
+			ContainerPort: port,
+			HostPort:      p.HostPort,
+			Protocol:      corev1.ProtocolTCP,
+		})
 	}
 
 	requests := corev1.ResourceList{}
@@ -850,7 +874,7 @@ func (c *Controller) addGameServerHealthCheck(gs *agonesv1.GameServer, pod *core
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
 						Path: "/gshealthz",
-						Port: intstr.FromInt(8080),
+						Port: intstr.FromInt32(sdkHealthPort(gs)),
 					},
 				},
 				// The sidecar relies on kubelet to delay by InitialDelaySeconds after the
@@ -918,19 +942,43 @@ func reservedEnvironmentVariableName(name string) bool {
 
 func sdkEnvironmentVariables(gs *agonesv1.GameServer) []corev1.EnvVar {
 	var env []corev1.EnvVar
-	if gs.Spec.SdkServer.GRPCPort != 0 {
+	grpcPort, httpPort := sdkServerPorts(gs)
+	if grpcPort != 0 {
 		env = append(env, corev1.EnvVar{
 			Name:  grpcPortEnvVar,
-			Value: strconv.Itoa(int(gs.Spec.SdkServer.GRPCPort)),
+			Value: strconv.Itoa(int(grpcPort)),
 		})
 	}
-	if gs.Spec.SdkServer.HTTPPort != 0 {
+	if httpPort != 0 {
 		env = append(env, corev1.EnvVar{
 			Name:  httpPortEnvVar,
-			Value: strconv.Itoa(int(gs.Spec.SdkServer.HTTPPort)),
+			Value: strconv.Itoa(int(httpPort)),
 		})
 	}
 	return env
+}
+
+// sdkServerPorts returns the gRPC and HTTP ports the SDK server sidecar binds to.
+// A port named agonesv1.SDKGRPCPortName / agonesv1.SDKHTTPPortName in spec.ports takes precedence over
+// spec.sdkServer, so each GameServer can get unique ports (e.g. with hostNetwork: true).
+func sdkServerPorts(gs *agonesv1.GameServer) (grpcPort, httpPort int32) {
+	grpcPort, httpPort = gs.Spec.SdkServer.GRPCPort, gs.Spec.SdkServer.HTTPPort
+	if p, ok := gs.Spec.SDKServerPort(agonesv1.SDKGRPCPortName); ok {
+		grpcPort = p
+	}
+	if p, ok := gs.Spec.SDKServerPort(agonesv1.SDKHTTPPortName); ok {
+		httpPort = p
+	}
+	return grpcPort, httpPort
+}
+
+// sdkHealthPort returns the port the SDK server sidecar serves its health checks on:
+// the port named agonesv1.SDKHealthPortName in spec.ports, or defaultSDKHealthPort.
+func sdkHealthPort(gs *agonesv1.GameServer) int32 {
+	if p, ok := gs.Spec.SDKServerPort(agonesv1.SDKHealthPortName); ok {
+		return p
+	}
+	return defaultSDKHealthPort
 }
 
 // syncGameServerStartingState looks for a pod that has been scheduled for this GameServer

@@ -35,6 +35,9 @@ const (
 	ErrContainerPortRequired    = "ContainerPort must be defined for Dynamic and Static PortPolicies"
 	ErrContainerPortPassthrough = "ContainerPort cannot be specified with Passthrough PortPolicy"
 	ErrContainerNameInvalid     = "Container must be empty or the name of a container in the pod template"
+	ErrSDKServerPortProtocol    = "SDK server ports must use the TCP protocol"
+	ErrSDKServerPortPolicy      = "SDK server ports must use the Passthrough, Dynamic or Static PortPolicy"
+	ErrSDKServerPortContainer   = "SDK server ports are always opened on the SDK server sidecar, so Container must be empty"
 	// GameServerPriorityIncrement is a Counter Action that indiciates the Counter's Count should be incremented at Allocation.
 	GameServerPriorityIncrement string = "Increment"
 	// GameServerPriorityDecrement is a Counter Action that indiciates the Counter's Count should be decremented at Allocation.

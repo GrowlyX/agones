@@ -163,6 +163,15 @@ game server processes give us the ability to run
 [sidecar containers](https://blog.davemdavis.net/2018/03/13/the-sidecar-pattern/), and provides an extra layer of
 security to each game server process.
 
+{{% feature publishVersion="1.62.0" %}}
+`hostPort` is still the default and recommended option. If you have measured that the `hostPort` routing overhead
+matters for your game servers, you can run them with `hostNetwork: true`, several per Node, by giving each `GameServer`
+its own SDK server sidecar ports with the reserved `agones-sdk-grpc`, `agones-sdk-http` and `agones-sdk-health` port
+names. You give up the network isolation between game server processes on the same Node, and every process in the Pod
+(including any other sidecar) must bind the ports Agones allocated to it. See
+[Running GameServers with hostNetwork]({{< ref "/docs/Reference/gameserver.md#running-gameservers-with-hostnetwork" >}}).
+{{% /feature %}}
+
 ## Performance
 
 ### How big an image can I use for my GameServer?
