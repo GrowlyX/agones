@@ -161,6 +161,19 @@ const (
 	//nolint:gosec // G101: matches on the "Pass" in "Passthrough"; this is an annotation key, not a credential.
 	PassthroughPortAssignmentAnnotation = "agones.dev/container-passthrough-port-assignment"
 
+	// SDKGRPCPortName is the reserved GameServer port name that, when present in spec.ports, sets the port the
+	// SDK server sidecar binds its gRPC server to (instead of spec.sdkServer.grpcPort), and the value of
+	// AGONES_SDK_GRPC_PORT in the game server containers.
+	SDKGRPCPortName = "agones-sdk-grpc"
+	// SDKHTTPPortName is the reserved GameServer port name that, when present in spec.ports, sets the port the
+	// SDK server sidecar binds its HTTP server to (instead of spec.sdkServer.httpPort), and the value of
+	// AGONES_SDK_HTTP_PORT in the game server containers.
+	SDKHTTPPortName = "agones-sdk-http"
+	// SDKHealthPortName is the reserved GameServer port name that, when present in spec.ports, sets the port the
+	// SDK server sidecar binds its health check server to (instead of 8080). The sidecar's own liveness probe and
+	// the game server container's /gshealthz liveness probe use this port.
+	SDKHealthPortName = "agones-sdk-health"
+
 	// True is the string "true" to appease the goconst lint.
 	True = "true"
 	// False is the string "false" to appease the goconst lint.
@@ -376,6 +389,31 @@ func (gs *GameServer) ApplyDefaults() {
 	gs.applyStatusDefaults()
 }
 
+// IsSDKServerPortName returns true if the port name is one of the reserved names
+// (SDKGRPCPortName, SDKHTTPPortName, SDKHealthPortName) that configure the SDK server sidecar's ports.
+func IsSDKServerPortName(name string) bool {
+	return name == SDKGRPCPortName || name == SDKHTTPPortName || name == SDKHealthPortName
+}
+
+// SDKServerPort returns the port number the SDK server sidecar should bind to for the reserved port name
+// (SDKGRPCPortName, SDKHTTPPortName or SDKHealthPortName), and whether such a port is defined and has a value.
+// For the Passthrough PortPolicy this is the allocated HostPort (the containerPort is set to the same value), otherwise
+// it is the ContainerPort, which is what the sidecar sees inside the Pod.
+// Ports are only allocated in the PortAllocation state, so this is meant to be called when building the Pod.
+func (gss *GameServerSpec) SDKServerPort(name string) (int32, bool) {
+	for _, p := range gss.Ports {
+		if p.Name != name {
+			continue
+		}
+		port := p.ContainerPort
+		if p.PortPolicy == Passthrough {
+			port = p.HostPort
+		}
+		return port, port > 0
+	}
+	return 0, false
+}
+
 // ApplyDefaults applies default values to the GameServerSpec if they are not already populated
 func (gss *GameServerSpec) ApplyDefaults() {
 	gss.applyContainerDefaults()
@@ -460,6 +498,10 @@ func (gss *GameServerSpec) applyPortDefaults() {
 
 		if p.Protocol == "" {
 			gss.Ports[i].Protocol = "UDP"
+			// the SDK server only serves TCP
+			if IsSDKServerPortName(p.Name) {
+				gss.Ports[i].Protocol = corev1.ProtocolTCP
+			}
 		}
 
 		if p.Container == nil || *p.Container == "" {
@@ -564,6 +606,7 @@ func (gss *GameServerSpec) Validate(apiHooks APIHooks, devAddress string, fldPat
 	}
 
 	// no host port when using dynamic PortPolicy
+	sdkPortNames := map[string]bool{}
 	for i, p := range gss.Ports {
 		path := fldPath.Child("ports").Index(i)
 		if p.PortPolicy == Dynamic || p.PortPolicy == Static {
@@ -578,6 +621,11 @@ func (gss *GameServerSpec) Validate(apiHooks APIHooks, devAddress string, fldPat
 
 		if p.HostPort > 0 && (p.PortPolicy == Dynamic || p.PortPolicy == Passthrough) {
 			allErrs = append(allErrs, field.Forbidden(path.Child("hostPort"), ErrHostPort))
+		}
+
+		if IsSDKServerPortName(p.Name) {
+			allErrs = append(allErrs, gss.validateSDKServerPort(p, path, sdkPortNames)...)
+			continue
 		}
 
 		if p.Container != nil && gss.Container != "" {
@@ -597,6 +645,27 @@ func (gss *GameServerSpec) Validate(apiHooks APIHooks, devAddress string, fldPat
 
 	allErrs = append(allErrs, apiHooks.ValidateGameServerSpec(gss, fldPath)...)
 	allErrs = append(allErrs, validateObjectMeta(&gss.Template.ObjectMeta, fldPath.Child("template", "metadata"))...)
+	return allErrs
+}
+
+// validateSDKServerPort validates a port that uses one of the reserved SDK server port names.
+// seen tracks the reserved names already validated, so each can only be used once.
+func (gss *GameServerSpec) validateSDKServerPort(p GameServerPort, path *field.Path, seen map[string]bool) field.ErrorList {
+	var allErrs field.ErrorList
+	if seen[p.Name] {
+		allErrs = append(allErrs, field.Duplicate(path.Child("name"), p.Name))
+	}
+	seen[p.Name] = true
+	if p.Protocol != "" && p.Protocol != corev1.ProtocolTCP {
+		allErrs = append(allErrs, field.Invalid(path.Child("protocol"), p.Protocol, ErrSDKServerPortProtocol))
+	}
+	if p.PortPolicy == None {
+		allErrs = append(allErrs, field.Invalid(path.Child("portPolicy"), p.PortPolicy, ErrSDKServerPortPolicy))
+	}
+	// applyPortDefaults sets the container to the game server container, so allow that value.
+	if p.Container != nil && *p.Container != "" && *p.Container != gss.Container {
+		allErrs = append(allErrs, field.Invalid(path.Child("container"), *p.Container, ErrSDKServerPortContainer))
+	}
 	return allErrs
 }
 
@@ -764,6 +833,10 @@ func (gs *GameServer) Pod(apiHooks APIHooks, sidecars ...corev1.Container) (*cor
 
 	passthroughContainerPortMap := make(map[string][]int)
 	for _, p := range gs.Spec.Ports {
+		// SDK server ports belong to the SDK server sidecar, which declares them itself.
+		if IsSDKServerPortName(p.Name) {
+			continue
+		}
 		var hostPort int32
 		portIdx := 0
 
