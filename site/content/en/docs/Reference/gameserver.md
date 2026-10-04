@@ -129,7 +129,10 @@ The `spec` field is the actual GameServer specification and it is composed as fo
 
 - `container` is the name of container running the GameServer in case you have more than one container defined in the [pod](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/). If you do,  this is a mandatory field. For instance this is useful if you want to run a sidecar to ship logs.
 - `ports` are an array of ports that can be exposed as direct connections to the game server container
-  - `name` is an optional descriptive name for a port
+  - `name` is an optional descriptive name for a port.
+{{% feature publishVersion="1.62.0" %}}
+    The names `agones-sdk-grpc`, `agones-sdk-http` and `agones-sdk-health` are reserved: they set the ports the SDK server sidecar binds to, instead of opening a port on the game server container. See [Running GameServers with hostNetwork]({{< relref "#running-gameservers-with-hostnetwork" >}}).
+{{% /feature %}}
   - `range` is the optional port range name from which to select a port when using a 'Dynamic' or 'Passthrough' port policy.
   - `portPolicy` has four options:
     - `Dynamic` (default) the system allocates a random free hostPort for the gameserver, for game clients to connect to.
@@ -180,6 +183,79 @@ with the standard `portmap` plugin a `hostPort` on an `initContainers` entry is 
 Check your CNI for compatibility before relying on this, and otherwise keep any container that needs a `GameServer`
 port in `containers`.
 {{% /alert %}}
+
+{{% feature publishVersion="1.62.0" %}}
+## Running GameServers with hostNetwork
+
+By default every `GameServer` Pod gets its own network namespace, and the SDK server sidecar binds fixed ports
+(`sdkServer.grpcPort`, `sdkServer.httpPort`, and 8080 for health checks). With `hostNetwork: true` all Pods on a
+Node share the Node's network namespace, so a second `GameServer` on the same Node would fail to bind those ports.
+
+To give each `GameServer` its own SDK server ports, add ports with the following reserved names to `spec.ports`,
+usually with the `Passthrough` port policy so that Agones allocates a free port on the Node for each of them:
+
+| Port name           | Sidecar flag    | Replaces                               | Also used for                                                           |
+|---------------------|-----------------|----------------------------------------|-------------------------------------------------------------------------|
+| `agones-sdk-grpc`   | `--grpc-port`   | `sdkServer.grpcPort` (default 9357)    | `AGONES_SDK_GRPC_PORT` in the game server containers                    |
+| `agones-sdk-http`   | `--http-port`   | `sdkServer.httpPort` (default 9358)    | `AGONES_SDK_HTTP_PORT` in the game server containers                    |
+| `agones-sdk-health` | `--health-port` | 8080                                   | the sidecar's liveness probe, and the game server container's `/gshealthz` liveness probe |
+
+Each of them is optional, and a `GameServer` without them is not changed. The SDKs read the `AGONES_SDK_*_PORT`
+environment variables, so game server code does not need to change.
+
+The reserved ports:
+
+- are declared on the SDK server sidecar container, not on the game server container, so `container` must be empty;
+- default to, and must use, the `TCP` protocol;
+- must not use the `None` port policy. With `Passthrough` the allocated `hostPort` is used; with `Static` or `Dynamic`
+  the `containerPort` is used (with `hostNetwork: true`, Kubernetes requires `hostPort` and `containerPort` to be equal,
+  so `Dynamic` does not work there);
+- are listed in `status.ports` (and in allocation results) like any other port, next to your game ports.
+
+The gRPC and HTTP servers listen on `localhost`, but the health check server listens on all interfaces (the kubelet
+probes it on the Pod IP, which is the Node IP with `hostNetwork: true`), so it is reachable from outside the Node unless
+a firewall blocks the port range.
+
+For example, a `Fleet` of `GameServers` that share the Node's network, several per Node:
+
+```yaml
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: simple-game-server-hostnetwork
+spec:
+  replicas: 4
+  template:
+    spec:
+      ports:
+        # the game port. simple-game-server reads the first port from the SDK with PASSTHROUGH=TRUE
+        - name: default
+          portPolicy: Passthrough
+          protocol: UDP
+        # the SDK server sidecar binds these, a different set for each GameServer
+        - name: agones-sdk-grpc
+          portPolicy: Passthrough
+        - name: agones-sdk-http
+          portPolicy: Passthrough
+        - name: agones-sdk-health
+          portPolicy: Passthrough
+      template:
+        spec:
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
+          containers:
+            - name: simple-game-server
+              image: us-docker.pkg.dev/agones-images/examples/simple-game-server:0.44
+              env:
+                - name: PASSTHROUGH
+                  value: "TRUE"
+```
+
+With `hostNetwork: true` the game server process must also bind the port Agones allocated to it (for example by using
+`Passthrough` and reading the port with the SDK's `GameServer()`), and any other sidecar containers you add must not
+use fixed ports either.
+
+{{% /feature %}}
 
 ## Stable Network ID
 

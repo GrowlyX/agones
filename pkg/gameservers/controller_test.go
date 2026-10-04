@@ -1740,6 +1740,103 @@ func TestControllerCreateGameServerPod(t *testing.T) {
 	})
 }
 
+func TestControllerCreateGameServerPodSDKServerPorts(t *testing.T) {
+	t.Parallel()
+
+	// TODO: remove mutex when "SidecarContainers" moves to stable.
+	agruntime.FeatureTestMutex.Lock()
+	defer agruntime.FeatureTestMutex.Unlock()
+	defer func() { require.NoError(t, agruntime.ParseFeatures("")) }()
+
+	// newFixture returns a GameServer in the state the controller builds the Pod in: after port allocation.
+	newFixture := func(sdkPorts bool) *agonesv1.GameServer {
+		gs := &agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+			Spec: newSingleContainerSpec(), Status: agonesv1.GameServerStatus{State: agonesv1.GameServerStateCreating}}
+		gs.Spec.Template.Spec.HostNetwork = true
+		gs.Spec.Ports = []agonesv1.GameServerPort{{Name: "default", PortPolicy: agonesv1.Passthrough, HostPort: 7001}}
+		if sdkPorts {
+			gs.Spec.Ports = append(gs.Spec.Ports,
+				agonesv1.GameServerPort{Name: agonesv1.SDKGRPCPortName, PortPolicy: agonesv1.Passthrough, HostPort: 7002},
+				agonesv1.GameServerPort{Name: agonesv1.SDKHTTPPortName, PortPolicy: agonesv1.Passthrough, HostPort: 7003},
+				agonesv1.GameServerPort{Name: agonesv1.SDKHealthPortName, PortPolicy: agonesv1.Passthrough, HostPort: 7004},
+			)
+		}
+		gs.ApplyDefaults()
+		return gs
+	}
+
+	for _, features := range []string{"SidecarContainers=true", "SidecarContainers=false"} {
+		t.Run(features, func(t *testing.T) {
+			require.NoError(t, agruntime.ParseFeatures(features))
+
+			createPod := func(t *testing.T, gs *agonesv1.GameServer) (sidecar, gsContainer corev1.Container, pod *corev1.Pod) {
+				c, m := newFakeController()
+				m.KubeClient.AddReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					pod = action.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+					return true, pod, nil
+				})
+				_, err := c.createGameServerPod(context.Background(), gs)
+				require.NoError(t, err)
+				require.NotNil(t, pod)
+				if agruntime.FeatureEnabled(agruntime.FeatureSidecarContainers) {
+					require.Len(t, pod.Spec.InitContainers, 1)
+					require.Len(t, pod.Spec.Containers, 1)
+					return pod.Spec.InitContainers[0], pod.Spec.Containers[0], pod
+				}
+				require.Len(t, pod.Spec.Containers, 2)
+				return pod.Spec.Containers[0], pod.Spec.Containers[1], pod
+			}
+
+			t.Run("with SDK server ports", func(t *testing.T) {
+				sidecar, gsContainer, pod := createPod(t, newFixture(true))
+
+				assert.True(t, pod.Spec.HostNetwork)
+				assert.Equal(t, sdkserverSidecarName, sidecar.Name)
+				assert.Equal(t, []string{"--grpc-port=7002", "--http-port=7003", "--health-port=7004"}, sidecar.Args)
+				assert.Equal(t, intstr.FromInt(7004), sidecar.LivenessProbe.HTTPGet.Port)
+				assert.Equal(t, []corev1.ContainerPort{
+					{ContainerPort: 7002, HostPort: 7002, Protocol: corev1.ProtocolTCP},
+					{ContainerPort: 7003, HostPort: 7003, Protocol: corev1.ProtocolTCP},
+					{ContainerPort: 7004, HostPort: 7004, Protocol: corev1.ProtocolTCP},
+				}, sidecar.Ports)
+
+				// only the game port is declared on the game server container
+				assert.Equal(t, []corev1.ContainerPort{{HostPort: 7001, Protocol: corev1.ProtocolUDP}}, gsContainer.Ports)
+				assert.JSONEq(t, `{"container":[0]}`, pod.ObjectMeta.Annotations[agonesv1.PassthroughPortAssignmentAnnotation])
+				assert.Equal(t, "/gshealthz", gsContainer.LivenessProbe.HTTPGet.Path)
+				assert.Equal(t, intstr.FromInt(7004), gsContainer.LivenessProbe.HTTPGet.Port)
+				assert.Contains(t, gsContainer.Env, corev1.EnvVar{Name: grpcPortEnvVar, Value: "7002"})
+				assert.Contains(t, gsContainer.Env, corev1.EnvVar{Name: httpPortEnvVar, Value: "7003"})
+			})
+
+			t.Run("without SDK server ports", func(t *testing.T) {
+				sidecar, gsContainer, _ := createPod(t, newFixture(false))
+
+				assert.Equal(t, []string{"--grpc-port=9357", "--http-port=9358"}, sidecar.Args)
+				assert.Equal(t, intstr.FromInt(8080), sidecar.LivenessProbe.HTTPGet.Port)
+				assert.Empty(t, sidecar.Ports)
+				assert.Equal(t, []corev1.ContainerPort{{HostPort: 7001, Protocol: corev1.ProtocolUDP}}, gsContainer.Ports)
+				assert.Equal(t, intstr.FromInt(8080), gsContainer.LivenessProbe.HTTPGet.Port)
+				assert.Contains(t, gsContainer.Env, corev1.EnvVar{Name: grpcPortEnvVar, Value: "9357"})
+				assert.Contains(t, gsContainer.Env, corev1.EnvVar{Name: httpPortEnvVar, Value: "9358"})
+			})
+
+			t.Run("only the health port", func(t *testing.T) {
+				gs := newFixture(false)
+				gs.Spec.Ports = append(gs.Spec.Ports, agonesv1.GameServerPort{Name: agonesv1.SDKHealthPortName,
+					PortPolicy: agonesv1.Static, ContainerPort: 8081, HostPort: 8081})
+				gs.ApplyDefaults()
+				sidecar, gsContainer, _ := createPod(t, gs)
+
+				assert.Equal(t, []string{"--grpc-port=9357", "--http-port=9358", "--health-port=8081"}, sidecar.Args)
+				assert.Equal(t, intstr.FromInt(8081), sidecar.LivenessProbe.HTTPGet.Port)
+				assert.Equal(t, intstr.FromInt(8081), gsContainer.LivenessProbe.HTTPGet.Port)
+				assert.Contains(t, gsContainer.Env, corev1.EnvVar{Name: grpcPortEnvVar, Value: "9357"})
+			})
+		})
+	}
+}
+
 func TestControllerSyncGameServerRequestReadyState(t *testing.T) {
 	t.Parallel()
 	nodeName := "node"
