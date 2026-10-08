@@ -588,7 +588,7 @@ func (c *Allocator) ListenAndAllocate(ctx context.Context, updateWorkerCount int
 				continue
 			}
 
-			updateQueue <- response{request: req, gs: gs.DeepCopy(), err: nil}
+			updateQueue <- response{request: req, gs: gs, err: nil}
 
 		case <-ctx.Done():
 			return
@@ -614,13 +614,14 @@ func (c *Allocator) allocationUpdateWorkers(ctx context.Context, workerCount int
 			for {
 				select {
 				case res := <-updateQueue:
-					gs, err := c.applyAllocationToGameServer(ctx, res.request.gsa.Spec.MetaPatch, res.gs, res.request.gsa)
+					gs, err := c.applyAllocationToGameServer(ctx, res.request.gsa.Spec.MetaPatch, res.gs.DeepCopy(), res.request.gsa)
 					if err != nil {
 						if !k8serrors.IsConflict(err) {
 							// since we could not allocate, we should put it back
 							// but not if it's a conflict, as the cache is no longer up to date, and
 							// we should wait for it to get updated with fresh info.
-							c.allocationCache.AddGameServer(gs)
+							// res.gs is the unmodified original: on error the client returns an empty object.
+							c.allocationCache.AddGameServer(res.gs)
 						}
 						res.err = ErrGameServerUpdateConflict
 					} else {
