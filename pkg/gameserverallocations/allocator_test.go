@@ -1020,6 +1020,47 @@ func TestControllerAllocationUpdateWorkers(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, gs1.ObjectMeta.Name, cached.ObjectMeta.Name)
 	})
+
+	t.Run("error on update returns empty object", func(t *testing.T) {
+		a, m := newFakeAllocator()
+
+		gs1 := &agonesv1.GameServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "gs1", Namespace: defaultNs},
+			Status:     agonesv1.GameServerStatus{State: agonesv1.GameServerStateReady},
+		}
+		key, err := cache.MetaNamespaceKeyFunc(gs1)
+		require.NoError(t, err)
+
+		r := response{
+			request: request{
+				gsa:      &allocationv1.GameServerAllocation{},
+				response: make(chan response, 1),
+				ctx:      context.Background(),
+			},
+			gs: gs1,
+		}
+
+		// the generated client returns an empty object alongside any error
+		m.AgonesClient.AddReactor("update", "gameservers", func(_ k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, &agonesv1.GameServer{}, errors.New("admission webhook denied the request")
+		})
+
+		updateQueue := a.allocationUpdateWorkers(context.Background(), 1)
+
+		go func() {
+			updateQueue <- r
+		}()
+
+		r = <-r.request.response
+		assert.EqualError(t, r.err, ErrGameServerUpdateConflict.Error())
+
+		cached, ok := a.allocationCache.cache.Load(key)
+		require.True(t, ok, "GameServer should be back in the cache after a failed update")
+		assert.Equal(t, gs1.ObjectMeta.Name, cached.ObjectMeta.Name)
+		assert.Equal(t, agonesv1.GameServerStateReady, cached.Status.State)
+		assert.Empty(t, cached.ObjectMeta.Annotations[LastAllocatedAnnotationKey])
+		assert.Equal(t, 1, a.allocationCache.cache.Len())
+	})
 }
 
 func TestAllocatorCreateRestClientError(t *testing.T) {
